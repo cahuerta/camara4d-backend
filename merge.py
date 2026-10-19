@@ -276,7 +276,7 @@ def merge_tomas(tomas, avance=_nada):
         "id": f"union-{np.base_repr(int(time.time() * 1000), 36).lower()}-{sufijo}",
         "nombre": f"Unión de {unidas} tomas", "fecha": ahora.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "origen": "servidor",
-        "voxel": acc.voxel, "intr": tomas[0].get("intr"),
+        "voxel": acc.voxel, "intr": tomas[0].get("intr"), "hoja": tomas[base].get("hoja"),
         "objeto": {"c": acc.obj["c"].tolist(), "r": acc.obj["r"]} if acc.obj else None,
         "mapas": 3,
         "partes": [d["id"] for d in detalle if d["unida"]],
