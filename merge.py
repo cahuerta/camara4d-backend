@@ -75,7 +75,7 @@ def hamming_rows(qb, qa):
     return D
 
 
-def match_pools(da, Xa, db, Xb, sep, max_dist=64, ratio=0.8):
+def match_pools(da, Xa, db, Xb, sep, max_dist=64, ratio=0.8, avance=None):
     """Pareja para cada firma de B: la más parecida de A, si es claramente mejor que la segunda.
     El mismo punto aparece en varias vistas de A, así que la segunda se busca solo entre puntos de otro lugar
     (a más de sep del primero); si no, el mismo punto repetido haría fallar la comparación."""
@@ -83,6 +83,8 @@ def match_pools(da, Xa, db, Xb, sep, max_dist=64, ratio=0.8):
     sep2 = sep * sep
     na = (Xa * Xa).sum(axis=1)
     for c0 in range(0, len(db), 512):
+        if avance:
+            avance(c0 / max(1, len(db)))
         D = hamming_rows(db[c0:c0 + 512], da)
         j1 = D.argmin(axis=1)
         b1 = D[np.arange(len(D)), j1].astype(np.int32)
@@ -111,13 +113,19 @@ def points_of(W: Trabajo, min_views, max_n):
     return P
 
 
-def align(A: Trabajo, B: Trabajo):
+def _nada(frac, etapa=None):
+    pass
+
+
+def align(A: Trabajo, B: Trabajo, avance=_nada):
+    """avance(fracción 0–1, etapa): informa cuánto lleva (para la barra de la app)."""
     da, Xa = pool_features(A)
     db, Xb = pool_features(B)
     if len(da) == 0 or len(db) == 0:
         return {"ok": False, "motivo": "una de las tomas no trae firmas de puntos"}
     tau = 3 * A.voxel
-    PA_m, PB_m = match_pools(da, Xa, db, Xb, 4 * tau)
+    avance(0.0, "buscando zonas en común")
+    PA_m, PB_m = match_pools(da, Xa, db, Xb, 4 * tau, avance=lambda f: avance(0.45 * f, "buscando zonas en común"))
     n = len(PA_m)
     if n < 12:
         return {"ok": False, "motivo": f"no comparten zonas reconocibles ({n} coincidencias)"}
@@ -126,6 +134,7 @@ def align(A: Trabajo, B: Trabajo):
     best, best_inl = None, np.zeros(0, int)
     ITER, LOTE = 40000, 4000
     for it0 in range(0, ITER, LOTE):
+        avance(0.45 + 0.35 * it0 / ITER, "alineando")
         it = np.arange(it0, it0 + LOTE)
         pool = np.minimum(n, 30 + it // 40)
         I = (RNG.random((LOTE, 3)) * pool[:, None]).astype(int)
@@ -165,6 +174,7 @@ def align(A: Trabajo, B: Trabajo):
 
     cur_d, cur_n = mean_dist(T)
     for it in range(20):
+        avance(0.8 + 0.18 * it / 20, "ajuste fino de superficies")
         thr = 3 * tau if it < 5 else 1.5 * tau
         d, j = tree.query(apply(T, PB), distance_upper_bound=thr)
         f = np.isfinite(d)
@@ -218,23 +228,46 @@ def _miles(n):
     return f"{n:,}".replace(",", ".")
 
 
-def merge_tomas(tomas):
+def merge_tomas(tomas, avance=_nada):
+    """avance(fracción 0–1, etapa) se llama durante el trabajo (para mostrar una barra de avance)."""
     if len(tomas) < 2:
         raise ValueError("se necesitan al menos 2 tomas")
-    acc = decode(tomas[0])
-    detalle = [{"id": tomas[0]["id"], "nombre": tomas[0].get("nombre"), "unida": True, "base": True}]
-    for T_ in tomas[1:]:
-        B = decode(T_)
-        r = align(acc, B)
-        if not r["ok"]:
-            detalle.append({"id": T_["id"], "nombre": T_.get("nombre"), "unida": False, "motivo": r["motivo"]})
-            continue
-        acc = fuse(acc, B, r["T"])
-        detalle.append({
-            "id": T_["id"], "nombre": T_.get("nombre"), "unida": True, "coincidencias": r["coincidencias"],
-            "solape": round(100 * r["solape"]), "error": round(100 * r["error"] / (acc.obj["r"] if acc.obj else 1), 2),
-            "escala": round(r["T"][0], 4),
-        })
+    avance(0.0, "leyendo tomas")
+    works = [decode(T_) for T_ in tomas]
+    # Base: la toma con más puntos. Las demás se prueban contra lo ya unido, en varias pasadas (una que no calzaba
+    # al principio puede calzar después, cuando lo unido ya cubre más caras)
+    orden = sorted(range(len(tomas)), key=lambda i: -works[i].n)
+    base = orden[0]
+    acc = works[base]
+    detalle = {base: {"id": tomas[base]["id"], "nombre": tomas[base].get("nombre"), "unida": True, "base": True}}
+    pendientes = orden[1:]
+    motivos = {}
+    total = max(1, len(pendientes))
+    hechos = 0
+    cambio = True
+    while pendientes and cambio:
+        cambio = False
+        for i in list(pendientes):
+            ini = min(hechos, total - 1) / total
+            nombre = tomas[i].get("nombre") or tomas[i]["id"]
+            r = align(acc, works[i], avance=lambda f, e=None, ini=ini, nombre=nombre: avance(0.02 + 0.93 * (ini + f / total), f"{e or 'alineando'} · {nombre}"))
+            if not r["ok"]:
+                motivos[i] = r["motivo"]
+                continue
+            avance(0.02 + 0.93 * (ini + 0.99 / total), f"fusionando · {nombre}")
+            acc = fuse(acc, works[i], r["T"])
+            pendientes.remove(i)
+            hechos += 1
+            cambio = True
+            detalle[i] = {
+                "id": tomas[i]["id"], "nombre": tomas[i].get("nombre"), "unida": True, "coincidencias": r["coincidencias"],
+                "solape": round(100 * r["solape"]), "error": round(100 * r["error"] / (acc.obj["r"] if acc.obj else 1), 2),
+                "escala": round(r["T"][0], 4),
+            }
+    for i in pendientes:
+        detalle[i] = {"id": tomas[i]["id"], "nombre": tomas[i].get("nombre"), "unida": False, "motivo": motivos.get(i, "sin zona en común")}
+    detalle = [detalle[i] for i in range(len(tomas))]
+    avance(0.96, "guardando el resultado")
     unidas = sum(1 for d in detalle if d["unida"])
     ahora = datetime.now(timezone.utc)
     sufijo = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
@@ -254,5 +287,6 @@ def merge_tomas(tomas):
     fallidas = [d for d in detalle if not d["unida"]]
     informe = f"{unidas} de {len(tomas)} tomas unidas en un modelo de {_miles(acc.n)} puntos."
     if fallidas:
-        informe += " Quedaron fuera: " + "; ".join(f"«{d['nombre'] or d['id']}» ({d['motivo']})" for d in fallidas) + "."
+                informe += (f" Quedaron fuera {len(fallidas)} por no tener una zona en común clara con el resto: "
+                    + ", ".join(f"«{d['nombre'] or d['id']}»" for d in fallidas) + ".")
     return {"toma": toma, "informe": informe, "detalle": detalle}
