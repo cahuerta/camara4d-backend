@@ -1,0 +1,13 @@
+# Render: configuración del servidor de Cámara 4D (Blueprint).
+# En Render: New → Blueprint → elegir este repo. Crea el servicio con estos datos.
+services:
+  - type: web
+    name: camara4d-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
