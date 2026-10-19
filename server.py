@@ -14,6 +14,14 @@ Rutas (las mismas que usa la app):
   POST   /unir/iniciar      { "ids": [...] } → empieza la unión en segundo plano → { "trabajo": id }
   GET    /unir/{trabajo}    avance: { estado, avance (0–100), etapa, segundos, resultado? }
 
+Sesiones con varias cámaras (el servidor arma un solo modelo con las vistas de todos los teléfonos):
+  POST   /sesiones                          { nombre } → crea una sesión: { codigo }
+  GET    /sesiones/{codigo}                 estado: nombre, cámaras, vistas, versión del modelo
+  POST   /sesiones/{codigo}/camaras         { nombre } → { camara }
+  POST   /sesiones/{codigo}/vistas          una vista: pose, imagen, máscara de la hoja → { vista }
+  POST   /sesiones/{codigo}/vistas/{vista}/profundidad   su mapa de profundidad (relieve)
+  GET    /sesiones/{codigo}/modelo?desde=N  modelo actual (forma + relieve + color) si cambió desde la versión N
+
 Iniciar:  uvicorn server:app --host 0.0.0.0 --port $PORT
 Variables de entorno: PORT (puerto), DATA_DIR (carpeta donde se guardan las tomas; por defecto ./data).
 Ojo: en Render gratis el disco se borra cuando el servicio se reinicia. Para conservar las tomas, montar un
@@ -36,6 +44,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from merge import merge_tomas
+import sesion as S
 from toma import summary, validate
 
 DATA = Path(os.environ.get("DATA_DIR", Path.cwd() / "data"))
@@ -156,6 +165,57 @@ async def unir(req: Request):
             work_lock.release()
     print("unir", ",".join(ids), "→", r["toma"]["id"], ms, "ms", flush=True)
     return {**r, "ms": ms}
+
+
+# ---------- Sesiones con varias cámaras ----------
+def _sesion(codigo):
+    try:
+        return S.buscar(codigo)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/sesiones")
+async def sesion_crear(req: Request):
+    body = await read_json(req)
+    s = S.crear(str(body.get("nombre", ""))[:60] if isinstance(body, dict) else "")
+    return s.resumen()
+
+
+@app.get("/sesiones/{codigo}")
+def sesion_estado(codigo: str):
+    return _sesion(codigo).resumen()
+
+
+@app.post("/sesiones/{codigo}/camaras")
+async def sesion_camara(codigo: str, req: Request):
+    s = _sesion(codigo)
+    body = await read_json(req)
+    return {"camara": s.unir_camara(str(body.get("nombre", ""))[:40] if isinstance(body, dict) else ""), **s.resumen()}
+
+
+@app.post("/sesiones/{codigo}/vistas")
+async def sesion_vista(codigo: str, req: Request):
+    s = _sesion(codigo)
+    body = await read_json(req)
+    vid = await run_in_threadpool(s.agregar_vista, body)
+    return {"vista": vid, "version": s.version}
+
+
+@app.post("/sesiones/{codigo}/vistas/{vid}/profundidad")
+async def sesion_profundidad(codigo: str, vid: str, req: Request):
+    s = _sesion(codigo)
+    body = await read_json(req)
+    await run_in_threadpool(s.agregar_profundidad, vid, body)
+    return {"ok": True, "version": s.version}
+
+
+@app.get("/sesiones/{codigo}/modelo")
+async def sesion_modelo(codigo: str, desde: int = -1):
+    s = _sesion(codigo)
+    if desde >= 0 and s.version == desde:
+        return {"version": s.version, "sin_cambios": True}
+    return await run_in_threadpool(s.modelo)
 
 
 def _ids_validos(body):
